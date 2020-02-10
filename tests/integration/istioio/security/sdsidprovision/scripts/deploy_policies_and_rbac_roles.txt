@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+
+# Copyright 2020 Istio Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+set -u
+set -o pipefail
+
+# $snippet deploy_nodeagent_policies_and_roles.sh
+$ cat <<EOF | kubectl apply -f
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: istio-nodeagent
+spec:
+  allowedHostPaths:
+  - pathPrefix: "/var/run/sds"
+  seLinux:
+    rule: RunAsAny
+  supplementalGroups:
+    rule: RunAsAny
+  runAsUser:
+    rule: RunAsAny
+  fsGroup:
+    rule: RunAsAny
+  volumes:
+  - '*'
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: istio-nodeagent
+  namespace: istio-system
+rules:
+- apiGroups:
+  - extensions
+  resources:
+  - podsecuritypolicies
+  resourceNames:
+  - istio-nodeagent
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: istio-nodeagent
+  namespace: istio-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: istio-nodeagent
+subjects:
+- kind: ServiceAccount
+  name: istio-nodeagent-service-account
+  namespace: istio-system
+EOF
+# $endsnippet
+
+# we need to stop other pods from modifying the Unix domain socket
+# used by Citadel Node Agent.
+
+# $snippet stop_other_pods_from_modifying_uds.sh
+$ cat <<EOF | kubectl apply -f
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: istio-sds-uds
+spec:
+ # Protect the unix domain socket from unauthorized modification
+ allowedHostPaths:
+ - pathPrefix: "/var/run/sds"
+   readOnly: true
+ # Allow the istio sidecar injector to work
+ allowedCapabilities:
+ - NET_ADMIN
+ seLinux:
+   rule: RunAsAny
+ supplementalGroups:
+   rule: RunAsAny
+ runAsUser:
+   rule: RunAsAny
+ fsGroup:
+   rule: RunAsAny
+ volumes:
+ - '*'
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: istio-sds-uds
+rules:
+- apiGroups:
+  - extensions
+  resources:
+  - podsecuritypolicies
+  resourceNames:
+  - istio-sds-uds
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: istio-sds-uds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: istio-sds-uds
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:serviceaccounts
+EOF
+# $endsnippet

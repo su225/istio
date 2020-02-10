@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+
+# Copyright 2020 Istio Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+set -u
+set -o pipefail
+
+# $snippet setup_httpbin_and_sleep_in_foo_and_bar.sh
+$ kubectl create ns foo
+$ kubectl label ns foo istio-injection=enabled
+$ kubectl apply -f @samples/httpbin/httpbin.yaml@ -n foo
+$ kubectl apply -f @samples/sleep/sleep.yaml@ -n foo
+$ kubectl create ns bar
+$ kubectl label ns bar istio-injection=enabled
+$ kubectl apply -f @samples/httpbin/httpbin.yaml@ -n bar
+$ kubectl apply -f @samples/sleep/sleep.yaml@ -n bar
+# $endsnippet
+
+# $snippet verify_mutual_tls_works.sh
+$ for from in "foo" "bar"; do \
+    for to in "foo" "bar"; do \
+      kubectl exec $(kubectl get pod -l app=sleep -n ${from} -o jsonpath={.items..metadata.name}) -c sleep -n ${from} -- \
+        curl "http://httpbin.${to}:8000/ip" -s -o /dev/null -w "sleep.${from} to httpbin.${to}: %{http_code}\n"; \
+    done; \
+  done;
+# $verify
+sleep.foo to httpbin.foo: 200
+sleep.foo to httpbin.bar: 200
+sleep.bar to httpbin.foo: 200
+sleep.bar to httpbin.bar: 200
+# $endsnippet
+
+# $snippet verify_no_secret_mounted.sh
+$ kubectl exec $(kubectl get pod -l app=sleep -n foo -o jsonpath={.items..metadata.name}) -c istio-proxy -n foo -- ls /etc/certs | wc -l
+# $verify
+0
+# $endsnippet
