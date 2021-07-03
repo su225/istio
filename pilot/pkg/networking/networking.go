@@ -106,6 +106,9 @@ type MutableObjects struct {
 	// Listener is the listener being built. Must be initialized before Plugin methods are called.
 	Listener *listener.Listener
 
+	// QUICListener is the listener which is added to support HTTP/3
+	QUICListener *listener.Listener
+
 	// FilterChains is the set of filter chains that will be attached to Listener.
 	FilterChains []FilterChain
 }

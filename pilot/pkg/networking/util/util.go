@@ -88,6 +88,10 @@ const (
 	// level tls transport socket configuration
 	EnvoyTLSSocketName = wellknown.TransportSocketTls
 
+	// EnvoyQUICSocketName matched with hardcoded built-in Envoy transport name which determines endpoint
+	// level QUIC transport socket configuration
+	EnvoyQUICSocketName = wellknown.TransportSocketQuic
+
 	// StatName patterns
 	serviceStatPattern         = "%SERVICE%"
 	serviceFQDNStatPattern     = "%SERVICE_FQDN%"
@@ -168,22 +172,30 @@ func ConvertAddressToCidr(addr string) *core.CidrRange {
 // BuildAddress returns a SocketAddress with the given ip and port or uds.
 func BuildAddress(bind string, port uint32) *core.Address {
 	if port != 0 {
-		return &core.Address{
-			Address: &core.Address_SocketAddress{
-				SocketAddress: &core.SocketAddress{
-					Address: bind,
-					PortSpecifier: &core.SocketAddress_PortValue{
-						PortValue: port,
-					},
-				},
-			},
-		}
+		return BuildNetworkAddress(bind, port, core.SocketAddress_TCP)
 	}
 
 	return &core.Address{
 		Address: &core.Address_Pipe{
 			Pipe: &core.Pipe{
 				Path: strings.TrimPrefix(bind, model.UnixAddressPrefix),
+			},
+		},
+	}
+}
+
+func BuildNetworkAddress(bind string, port uint32, protocol core.SocketAddress_Protocol) *core.Address {
+	if port == 0 {
+		return nil
+	}
+	return &core.Address{
+		Address: &core.Address_SocketAddress{
+			SocketAddress: &core.SocketAddress{
+				Address:  bind,
+				Protocol: protocol,
+				PortSpecifier: &core.SocketAddress_PortValue{
+					PortValue: port,
+				},
 			},
 		},
 	}

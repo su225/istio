@@ -27,6 +27,7 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	envoyquicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -346,7 +347,7 @@ func (configgen *ConfigGeneratorImpl) buildSidecarInboundListenerForPortOrUDS(li
 	// aggregate them back to filter chains in the virtual listener. This is complex and inefficient.
 	// We should instead just directly construct the filter chains. We do still need the ability to
 	// create full listeners for bind-to-port listeners added explicitly, but they are not common.
-	l := buildListener(listenerOpts, core.TrafficDirection_INBOUND)
+	l, _ := buildListener(listenerOpts, core.TrafficDirection_INBOUND, false)
 
 	mutable := &MutableListener{
 		MutableObjects: istionetworking.MutableObjects{
@@ -672,7 +673,7 @@ func (configgen *ConfigGeneratorImpl) buildHTTPProxy(node *model.Proxy,
 		bindToPort:      true,
 		skipUserFilters: true,
 	}
-	l := buildListener(opts, core.TrafficDirection_OUTBOUND)
+	l, _ := buildListener(opts, core.TrafficDirection_OUTBOUND, false)
 
 	// TODO: plugins for HTTP_PROXY mode, envoyfilter needs another listener match for SIDECAR_HTTP_PROXY
 	mutable := &MutableListener{
@@ -1039,7 +1040,7 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundListenerForPortOrUDS(l
 
 	// Lets build the new listener with the filter chains. In the end, we will
 	// merge the filter chains with any existing listener on the same port/bind point
-	l := buildListener(listenerOpts, core.TrafficDirection_OUTBOUND)
+	l, _ := buildListener(listenerOpts, core.TrafficDirection_OUTBOUND, false)
 
 	mutable := &MutableListener{
 		MutableObjects: istionetworking.MutableObjects{
@@ -1180,6 +1181,8 @@ type httpListenerOpts struct {
 	// should be added.
 	addGRPCWebFilter bool
 	useRemoteAddress bool
+
+	supportHTTP3 bool
 }
 
 // filterChainOpts describes a filter chain: a set of filters with the same TLS context
@@ -1312,14 +1315,25 @@ func buildHTTPConnectionManager(listenerOpts buildListenerOpts, httpOpts *httpLi
 
 	connectionManager.HttpFilters = filters
 
+	if httpOpts.supportHTTP3 {
+		connectionManager.Http3ProtocolOptions = &core.Http3ProtocolOptions{}
+		connectionManager.CodecType = hcm.HttpConnectionManager_HTTP3
+	}
+
 	return connectionManager
 }
 
 // buildListener builds and initializes a Listener proto based on the provided opts. It does not set any filters.
-func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirection) *listener.Listener {
+// Optionally for HTTP filters with TLS enabled, HTTP/3 can be supported by generating QUIC Mirror filters for the
+// same port (it is fine as QUIC uses UDP)
+func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirection, buildQUICMirrorListener bool) (
+	*listener.Listener, *listener.Listener) {
 	filterChains := make([]*listener.FilterChain, 0, len(opts.filterChainOpts))
+	quicFilterChains := make([]*listener.FilterChain, 0)
 	listenerFiltersMap := make(map[string]bool)
 	var listenerFilters []*listener.ListenerFilter
+
+	log.Debugf("buildListener ===> buildQUICMirrorListener = %v", buildQUICMirrorListener)
 
 	// add a TLS inspector if we need to detect ServerName or ALPN
 	needTLSInspector := false
@@ -1404,6 +1418,19 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
 			FilterChainMatch: match,
 			TransportSocket:  buildDownstreamTLSTransportSocket(chain.tlsContext),
 		})
+		log.Debugf("quicFilterCriteria ===> flag=%v, protocol=%v, class=%v, tlsctx=%v", buildQUICMirrorListener,
+			opts.protocol, opts.class, chain.tlsContext)
+
+		// Create QUIC mirror listener at the same port (Kubernetes load-balancer type services
+		// seem to have the problem with same svc->target with protocols differed. Think of ways
+		// to avoid this problem later)
+		if buildQUICMirrorListener && chain.tlsContext != nil && opts.class == ListenerClassGateway {
+			log.Debugf("quicMirrorListener ==> added chain")
+			quicFilterChains = append(quicFilterChains, &listener.FilterChain{
+				FilterChainMatch: match,
+				TransportSocket:  buildDownstreamQUICTransportSocket(chain.tlsContext),
+			})
+		}
 	}
 
 	var deprecatedV1 *listener.Listener_DeprecatedV1
@@ -1413,7 +1440,7 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
 		}
 	}
 
-	listener := &listener.Listener{
+	tcpListener := &listener.Listener{
 		// TODO: need to sanitize the opts.bind if its a UDS socket, as it could have colons, that envoy
 		// doesn't like
 		Name:             opts.bind + "_" + strconv.Itoa(opts.port.Port),
@@ -1424,16 +1451,36 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
 		DeprecatedV1:     deprecatedV1,
 	}
 
-	accessLogBuilder.setListenerAccessLog(opts.push, opts.proxy, listener)
+	// QUIC filter chains would be different as we consider only those with
+	// Downstream TLS context provided. It is a subset of the filter chains
+	// for the TCP chain
+	var quicListener *listener.Listener
+	if buildQUICMirrorListener && len(quicFilterChains) > 0 {
+		// Source: https://github.com/envoyproxy/envoy/blob/main/configs/envoyproxy_io_proxy_http3_downstream.yaml
+		quicListener = &listener.Listener{
+			Name:      "quic" + "_" + opts.bind + "_" + strconv.Itoa(opts.port.Port),
+			Address:   util.BuildNetworkAddress(opts.bind, uint32(opts.port.Port), core.SocketAddress_UDP),
+			ReusePort: true,
+			UdpListenerConfig: &listener.UdpListenerConfig{
+				QuicOptions: &listener.QuicProtocolOptions{},
+			},
+			TrafficDirection: trafficDirection,
+			FilterChains:     quicFilterChains,
+		}
+		log.Debugf("quicMirrorListener ==> built listener with %d chains for port %d",
+			len(quicFilterChains), opts.port.Port)
+	}
+
+	accessLogBuilder.setListenerAccessLog(opts.push, opts.proxy, tcpListener)
 
 	if opts.proxy.Type != model.Router {
-		listener.ListenerFiltersTimeout = gogo.DurationToProtoDuration(opts.push.Mesh.ProtocolDetectionTimeout)
-		if listener.ListenerFiltersTimeout != nil {
-			listener.ContinueOnListenerFiltersTimeout = true
+		tcpListener.ListenerFiltersTimeout = gogo.DurationToProtoDuration(opts.push.Mesh.ProtocolDetectionTimeout)
+		if tcpListener.ListenerFiltersTimeout != nil {
+			tcpListener.ContinueOnListenerFiltersTimeout = true
 		}
 	}
 
-	return listener
+	return tcpListener, quicListener
 }
 
 func getMatchAllFilterChain(l *listener.Listener) (int, *listener.FilterChain) {
@@ -1527,6 +1574,34 @@ func (ml *MutableListener) build(opts buildListenerOpts) error {
 		}
 	}
 
+	return nil
+}
+
+func (ml *MutableListener) buildQUIC(opts buildListenerOpts) error {
+	// When QUICListener is not present then skip
+	if ml.QUICListener == nil {
+		return nil
+	}
+	if len(opts.filterChainOpts) == 0 {
+		return fmt.Errorf("cannot build QUIC listener %q without any configured filter chanins", ml.QUICListener.Name)
+	}
+	httpConnectionManagers := make([]*hcm.HttpConnectionManager, len(ml.FilterChains))
+	for i := range ml.FilterChains {
+		// We build QUIC filter chains only for HTTP
+		// Currently only HTTP/3 is supported
+		chain := ml.FilterChains[i]
+		fcOpts := opts.filterChainOpts[i]
+		if fcOpts.httpOpts == nil {
+			continue
+		}
+		fcOpts.httpOpts.supportHTTP3 = true
+		httpConnectionManagers[i] = buildHTTPConnectionManager(opts, fcOpts.httpOpts, chain.HTTP)
+		filter := &listener.Filter{
+			Name:       wellknown.HTTPConnectionManager,
+			ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(httpConnectionManagers[i])},
+		}
+		ml.QUICListener.FilterChains[i].Filters = append(ml.QUICListener.FilterChains[i].Filters, filter)
+	}
 	return nil
 }
 
@@ -1729,7 +1804,24 @@ func buildDownstreamTLSTransportSocket(tlsContext *auth.DownstreamTlsContext) *c
 	if tlsContext == nil {
 		return nil
 	}
-	return &core.TransportSocket{Name: util.EnvoyTLSSocketName, ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(tlsContext)}}
+	return &core.TransportSocket{
+		Name:       util.EnvoyTLSSocketName,
+		ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(tlsContext)},
+	}
+}
+
+func buildDownstreamQUICTransportSocket(tlsContext *auth.DownstreamTlsContext) *core.TransportSocket {
+	if tlsContext == nil {
+		return nil
+	}
+	return &core.TransportSocket{
+		Name: util.EnvoyQUICSocketName,
+		ConfigType: &core.TransportSocket_TypedConfig{
+			TypedConfig: util.MessageToAny(&envoyquicv3.QuicDownstreamTransport{
+				DownstreamTlsContext: tlsContext,
+			}),
+		},
+	}
 }
 
 func isMatchAllFilterChain(fc *listener.FilterChain) bool {

@@ -163,7 +163,9 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 						server, mergedGateway.GatewayNameForServer[server])
 					newFilterChainOpts = append(newFilterChainOpts, tcpChainOpts...)
 					for i := 0; i < len(tcpChainOpts); i++ {
-						newFilterChains = append(newFilterChains, istionetworking.FilterChain{ListenerProtocol: istionetworking.ListenerProtocolTCP})
+						newFilterChains = append(newFilterChains, istionetworking.FilterChain{
+							ListenerProtocol: istionetworking.ListenerProtocolTCP,
+						})
 					}
 				}
 			}
@@ -199,7 +201,7 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 	}
 	listeners := make([]*listener.Listener, 0)
 	for _, ml := range mutableopts {
-		ml.mutable.Listener = buildListener(*ml.opts, core.TrafficDirection_OUTBOUND)
+		ml.mutable.Listener, ml.mutable.QUICListener = buildListener(*ml.opts, core.TrafficDirection_OUTBOUND, features.EnableQUICListeners)
 		// Filters are serialized one time into an opaque struct once we have the complete list.
 		if err := ml.mutable.build(*ml.opts); err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("gateway omitting listener %q due to: %v", ml.mutable.Listener.Name, err.Error()))
@@ -211,6 +213,18 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 				len(ml.mutable.Listener.FilterChains), ml.mutable.Listener)
 		}
 		listeners = append(listeners, ml.mutable.Listener)
+		if features.EnableQUICListeners && ml.mutable.QUICListener != nil {
+			if err := ml.mutable.buildQUIC(*ml.opts); err != nil {
+				errs = multierror.Append(errs, fmt.Errorf("gateway cannot build QUIC mirror for listener %q due to: %v",
+					ml.mutable.QUICListener.Name, err.Error()))
+				continue
+			}
+			if log.DebugEnabled() {
+				log.Debugf("buildGatewayListeners: constructed QUIC mirror listener %q with %d filter chains: %v",
+					ml.mutable.QUICListener.Name, len(ml.mutable.QUICListener.FilterChains), ml.mutable.QUICListener)
+			}
+			listeners = append(listeners, ml.mutable.QUICListener)
+		}
 	}
 	// We'll try to return any listeners we successfully marshaled; if we have none, we'll emit the error we built up
 	err := errs.ErrorOrNil()
@@ -517,7 +531,7 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 			httpOpts: &httpListenerOpts{
 				rds:               routeName,
 				useRemoteAddress:  true,
-				connectionManager: buildGatewayConnectionManager(proxyConfig, node),
+				connectionManager: buildGatewayConnectionManager(proxyConfig, node, false /* http3SupportEnabled */),
 				addGRPCWebFilter:  serverProto == protocol.GRPCWeb,
 			},
 		}
@@ -535,14 +549,14 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 		httpOpts: &httpListenerOpts{
 			rds:               routeName,
 			useRemoteAddress:  true,
-			connectionManager: buildGatewayConnectionManager(proxyConfig, node),
+			connectionManager: buildGatewayConnectionManager(proxyConfig, node, features.EnableQUICListeners),
 			addGRPCWebFilter:  serverProto == protocol.GRPCWeb,
 			statPrefix:        server.Name,
 		},
 	}
 }
 
-func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *model.Proxy) *hcm.HttpConnectionManager {
+func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *model.Proxy, http3SupportEnabled bool) *hcm.HttpConnectionManager {
 	httpProtoOpts := &core.Http1ProtocolOptions{}
 	if features.HTTP10 || node.Metadata.HTTP10 == "1" {
 		httpProtoOpts.AcceptHttp_10 = true
@@ -561,6 +575,14 @@ func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *mo
 	if features.StripHostPort {
 		stripPortMode = &hcm.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 	}
+
+	// Advertise that the gateway supports HTTP/3 when QUIC
+	// listener generation is supported
+	var http3ProtocolOptions *core.Http3ProtocolOptions
+	if http3SupportEnabled && features.EnableQUICListeners {
+		http3ProtocolOptions = &core.Http3ProtocolOptions{}
+	}
+
 	return &hcm.HttpConnectionManager{
 		XffNumTrustedHops: xffNumTrustedHops,
 		// Forward client cert if connection is mTLS
@@ -571,10 +593,11 @@ func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *mo
 			Uri:     true,
 			Dns:     true,
 		},
-		ServerName:          EnvoyServerName,
-		HttpProtocolOptions: httpProtoOpts,
-		StripPortMode:       stripPortMode,
-		DelayedCloseTimeout: features.DelayedCloseTimeout,
+		ServerName:           EnvoyServerName,
+		HttpProtocolOptions:  httpProtoOpts,
+		StripPortMode:        stripPortMode,
+		DelayedCloseTimeout:  features.DelayedCloseTimeout,
+		Http3ProtocolOptions: http3ProtocolOptions,
 	}
 }
 
