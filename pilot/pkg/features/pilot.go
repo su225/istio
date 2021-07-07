@@ -501,7 +501,7 @@ var (
 	UseTargetPortForGatewayRoutes = env.RegisterBoolVar("PILOT_USE_TARGET_PORT_FOR_GATEWAY_ROUTES", true,
 		"If true, routes will use the target port of the gateway service in the route name, not the service port.").Get()
 
-	EnableQUICListeners = env.RegisterBoolVar("PILOT_ENABLE_QUIC_LISTENERS", true,
+	EnableQUICListeners = env.RegisterBoolVar("PILOT_ENABLE_QUIC_LISTENERS", false,
 		"If true, QUIC listeners will be generated wherever there are listeners terminating TLS").Get()
 )
 

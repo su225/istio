@@ -16,6 +16,7 @@ package util
 
 import (
 	"fmt"
+	istionetworking "istio.io/istio/pilot/pkg/networking"
 	"net"
 	"sort"
 	"strconv"
@@ -125,6 +126,9 @@ var ALPNInMeshWithMxc = []string{"istio-peer-exchange", "istio"}
 // ALPNHttp advertises that Proxy is going to talking either http2 or http 1.1.
 var ALPNHttp = []string{"h2", "http/1.1"}
 
+// ALPNHttp3OverQUIC advertises that Proxy is going to talk HTTP/3 over QUIC
+var ALPNHttp3OverQUIC = []string{"h3"} // TODO: Add various h3-* corresponding to drafts
+
 // ALPNDownstream advertises that Proxy is going to talking either tcp(for metadata exchange), http2 or http 1.1.
 var ALPNDownstream = []string{"istio-peer-exchange", "h2", "http/1.1"}
 
@@ -172,7 +176,7 @@ func ConvertAddressToCidr(addr string) *core.CidrRange {
 // BuildAddress returns a SocketAddress with the given ip and port or uds.
 func BuildAddress(bind string, port uint32) *core.Address {
 	if port != 0 {
-		return BuildNetworkAddress(bind, port, core.SocketAddress_TCP)
+		return BuildNetworkAddress(bind, port, istionetworking.TransportProtocolTCP)
 	}
 
 	return &core.Address{
@@ -184,7 +188,7 @@ func BuildAddress(bind string, port uint32) *core.Address {
 	}
 }
 
-func BuildNetworkAddress(bind string, port uint32, protocol core.SocketAddress_Protocol) *core.Address {
+func BuildNetworkAddress(bind string, port uint32, transport istionetworking.TransportProtocol) *core.Address {
 	if port == 0 {
 		return nil
 	}
@@ -192,7 +196,7 @@ func BuildNetworkAddress(bind string, port uint32, protocol core.SocketAddress_P
 		Address: &core.Address_SocketAddress{
 			SocketAddress: &core.SocketAddress{
 				Address:  bind,
-				Protocol: protocol,
+				Protocol: transport.ToEnvoySocketProtocol(),
 				PortSpecifier: &core.SocketAddress_PortValue{
 					PortValue: port,
 				},
