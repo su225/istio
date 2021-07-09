@@ -236,20 +236,6 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 								continue
 							}
 							serversByRouteName[routeName] = []*networking.Server{s}
-
-							if features.EnableQUICListeners &&
-								gateway.IsEligibleForHTTP3Upgrade(s) {
-								// same port, but different protocol issues. Do it later
-								// so deliberately commented out. First translate to target
-								//udpSupportedPort(s.GetPort().GetNumber(), gwAndInstance.instances) {
-								log.Debugf("Server at port %d eligible for HTTP3 upgrade. So QUIC listener will be added", serverPort)
-								if mergedQUICServers[serverPort] == nil {
-									mergedQUICServers[serverPort] = &MergedServers{Servers: []*networking.Server{s}}
-									serverPorts = append(serverPorts, serverPort)
-								} else {
-									mergedQUICServers[serverPort].Servers = append(mergedQUICServers[serverPort].Servers, s)
-								}
-							}
 						}
 
 						// We have another TLS server on the same port. Can differentiate servers using SNI
@@ -263,6 +249,18 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 						} else {
 							mergedTCPServers[serverPort].Servers = append(mergedTCPServers[serverPort].Servers, s)
 						}
+
+						// We have TLS settings defined and we have already taken care of unique route names
+						// if it is HTTPS. So we can construct a QUIC server on the same port. It is okay as
+						// QUIC listens on UDP port, not TCP
+						if features.EnableQUICListeners && gateway.IsEligibleForHTTP3Upgrade(s) {
+							log.Debugf("Server at port %d eligible for HTTP3 upgrade. Add QUIC listener", serverPort.Number)
+							if mergedQUICServers[serverPort] == nil {
+								mergedQUICServers[serverPort] = &MergedServers{Servers: []*networking.Server{s}}
+							} else {
+								mergedQUICServers[serverPort].Servers = append(mergedQUICServers[serverPort].Servers, s)
+							}
+						}
 					}
 				} else {
 					// This is a new gateway on this port. Create MergedTCPServers for it.
@@ -275,10 +273,9 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 						if features.EnableQUICListeners && gateway.IsEligibleForHTTP3Upgrade(s) {
 							// Deliberately commented out code
 							//udpSupportedPort(s.GetPort().GetNumber(), gwAndInstance.instances) {
-							log.Debugf("Server at port %d eligible for HTTP3 upgrade. So QUIC listener will be added", serverPort)
+							log.Debugf("Server at port %d eligible for HTTP3 upgrade. So QUIC listener will be added", serverPort.Number)
 							if mergedQUICServers[serverPort] == nil {
 								mergedQUICServers[serverPort] = &MergedServers{Servers: []*networking.Server{s}}
-								serverPorts = append(serverPorts, serverPort)
 							} else {
 								mergedQUICServers[serverPort].Servers = append(mergedQUICServers[serverPort].Servers, s)
 							}
