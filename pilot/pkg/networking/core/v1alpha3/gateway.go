@@ -145,6 +145,8 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 
 			// on a given port, we can either have plain text HTTP servers or
 			// HTTPS/TLS servers with SNI. We cannot have a mix of http and https server on same port.
+			// We can also have QUIC on a given port along with HTTPS/TLS on a given port. It does not
+			// cause port-conflict as they use different transport protocols
 			opts := &buildListenerOpts{
 				push:       builder.push,
 				proxy:      builder.node,
@@ -229,6 +231,9 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 					quicFilterChainOpts = append(quicFilterChainOpts, configgen.createGatewayHTTPFilterChainOpts(builder.node, server.Port, server,
 						routeName, proxyConfig, istionetworking.TransportProtocolQUIC))
 					newFilterChains = append(newFilterChains, istionetworking.FilterChain{
+						// Make sure that this is set to HTTP so that JWT and Authorization
+						// filters that are applied to HTTPS are also applied to this chain.
+						// Not doing so is a security hole as would allow bypassing auth.
 						ListenerProtocol:   istionetworking.ListenerProtocolHTTP,
 						TransportProtocol:  istionetworking.TransportProtocolQUIC,
 						IstioMutualGateway: false, // Currently, we don't support this. Revisit later
@@ -620,6 +625,9 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 				features.EnableQUICListeners && transportProtocol == istionetworking.TransportProtocolQUIC),
 			addGRPCWebFilter: serverProto == protocol.GRPCWeb,
 			statPrefix:       server.Name,
+			// In future, maybe we need to check that the listener protocol is HTTP as well?
+			// But now we assume that only HTTP/3 goes over QUIC.
+			supportHTTP3: transportProtocol == istionetworking.TransportProtocolQUIC,
 		},
 	}
 }

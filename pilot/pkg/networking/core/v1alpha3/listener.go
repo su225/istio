@@ -1233,7 +1233,12 @@ func buildHTTPConnectionManager(listenerOpts buildListenerOpts, httpOpts *httpLi
 	}
 
 	connectionManager := httpOpts.connectionManager
-	connectionManager.CodecType = hcm.HttpConnectionManager_AUTO
+	if httpOpts.supportHTTP3 {
+		connectionManager.CodecType = hcm.HttpConnectionManager_HTTP3
+		connectionManager.Http3ProtocolOptions = &core.Http3ProtocolOptions{}
+	} else {
+		connectionManager.CodecType = hcm.HttpConnectionManager_AUTO
+	}
 	connectionManager.AccessLog = []*accesslog.AccessLog{}
 	connectionManager.StatPrefix = httpOpts.statPrefix
 	connectionManager.DelayedCloseTimeout = features.DelayedCloseTimeout
@@ -1316,11 +1321,6 @@ func buildHTTPConnectionManager(listenerOpts buildListenerOpts, httpOpts *httpLi
 
 	connectionManager.HttpFilters = filters
 
-	if httpOpts.supportHTTP3 {
-		connectionManager.Http3ProtocolOptions = &core.Http3ProtocolOptions{}
-		connectionManager.CodecType = hcm.HttpConnectionManager_HTTP3
-	}
-
 	return connectionManager
 }
 
@@ -1333,12 +1333,15 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
 	var listenerFilters []*listener.ListenerFilter
 
 	// add a TLS inspector if we need to detect ServerName or ALPN
+	// (this is not applicable for QUIC listeners)
 	needTLSInspector := false
-	for _, chain := range opts.filterChainOpts {
-		needsALPN := chain.tlsContext != nil && chain.tlsContext.CommonTlsContext != nil && len(chain.tlsContext.CommonTlsContext.AlpnProtocols) > 0
-		if len(chain.sniHosts) > 0 || needsALPN {
-			needTLSInspector = true
-			break
+	if opts.transport == istionetworking.TransportProtocolTCP {
+		for _, chain := range opts.filterChainOpts {
+			needsALPN := chain.tlsContext != nil && chain.tlsContext.CommonTlsContext != nil && len(chain.tlsContext.CommonTlsContext.AlpnProtocols) > 0
+			if len(chain.sniHosts) > 0 || needsALPN {
+				needTLSInspector = true
+				break
+			}
 		}
 	}
 
@@ -1355,14 +1358,14 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
 	// needed, since we are explicitly setting transport protocol in every single
 	// match. We can do this for outbound as well, at which point this could be
 	// removed, but have not yet
-	if opts.transport != istionetworking.TransportProtocolQUIC &&
+	if opts.transport == istionetworking.TransportProtocolTCP &&
 		(needTLSInspector || (opts.class == ListenerClassSidecarOutbound && opts.needHTTPInspector)) {
 		listenerFiltersMap[wellknown.TlsInspector] = true
 		listenerFilters = append(listenerFilters, xdsfilters.TLSInspector)
 	}
 
 	// TODO: For now we assume that only HTTP/3 is used over QUIC. Revisit this in the future
-	if opts.needHTTPInspector && opts.transport != istionetworking.TransportProtocolQUIC {
+	if opts.needHTTPInspector && opts.transport == istionetworking.TransportProtocolTCP {
 		listenerFiltersMap[wellknown.HttpInspector] = true
 		listenerFilters = append(listenerFilters, xdsfilters.HTTPInspector)
 	}
@@ -1464,7 +1467,11 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
 			TrafficDirection: trafficDirection,
 			FilterChains:     filterChains,
 			UdpListenerConfig: &listener.UdpListenerConfig{
-				QuicOptions: &listener.QuicProtocolOptions{},
+				// TODO: Maybe we should add options in MeshConfig to
+				//       configure QUIC options - it should look similar
+				//       to the H2 protocol options.
+				QuicOptions:            &listener.QuicProtocolOptions{},
+				DownstreamSocketConfig: &core.UdpSocketConfig{},
 			},
 			ReusePort: true,
 		}
