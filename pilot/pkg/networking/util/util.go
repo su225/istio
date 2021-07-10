@@ -127,7 +127,7 @@ var ALPNInMeshWithMxc = []string{"istio-peer-exchange", "istio"}
 var ALPNHttp = []string{"h2", "http/1.1"}
 
 // ALPNHttp3OverQUIC advertises that Proxy is going to talk HTTP/3 over QUIC
-var ALPNHttp3OverQUIC = []string{"h3"} // TODO: Add various h3-* corresponding to drafts
+var ALPNHttp3OverQUIC = []string{"h3", "h3-29"} // TODO: Add various h3-* corresponding to drafts
 
 // ALPNDownstream advertises that Proxy is going to talking either tcp(for metadata exchange), http2 or http 1.1.
 var ALPNDownstream = []string{"istio-peer-exchange", "h2", "http/1.1"}
