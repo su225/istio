@@ -118,29 +118,19 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 			bind = port.Bind
 		}
 
+		// NOTE: There is no gating here to check for the value of the QUIC feature flag. However,
+		// they are created in MergeGatways only when the flag is set. So when it is turned off, the
+		// MergedQUICServers would be nil so that no listener would be created. It is written this way
+		// to make testing a little easier.
 		transportToServers := map[istionetworking.TransportProtocol]map[model.ServerPort]*model.MergedServers{
-			istionetworking.TransportProtocolTCP: mergedGateway.MergedTCPServers,
-		}
-		if features.EnableQUICListeners {
-			transportToServers[istionetworking.TransportProtocolQUIC] = mergedGateway.MergedQUICServers
+			istionetworking.TransportProtocolTCP:  mergedGateway.MergedTCPServers,
+			istionetworking.TransportProtocolQUIC: mergedGateway.MergedQUICServers,
 		}
 
 		for transport, gwServers := range transportToServers {
 			if gwServers == nil {
 				log.Debugf("buildGatewayListeners: no gateway-server for transport %s at port %d", transport.String(), port)
 				continue
-			}
-
-			if log.DebugEnabled() {
-				// For debugging purposes only. Log all merged servers and
-				// the corresponding route name per entry.
-				for sp, ms := range gwServers {
-					log.Debugf("buildGatewayListeners: port: %d (protocol: %s)", sp.Protocol, sp.Bind)
-					serversJSON, _ := json.MarshalIndent(ms, "  ", "  ")
-					if serversJSON != nil {
-						log.Debugf("buildGatewayListeners: servers: %s", string(serversJSON))
-					}
-				}
 			}
 
 			// on a given port, we can either have plain text HTTP servers or
@@ -157,18 +147,11 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 				transport:  transport,
 			}
 			lname := configgen.getListenerName(bind, int(port.Number), transport)
-			log.Debugf("buildGatewayListeners: name assigned to listener: %s", lname)
-
 			p := protocol.Parse(port.Protocol)
 			newFilterChains := make([]istionetworking.FilterChain, 0)
 			serversForPort := gwServers[port]
 			if serversForPort == nil {
 				continue
-			}
-
-			s4t, _ := json.MarshalIndent(serversForPort, "  ", "  ")
-			if s4t != nil {
-				log.Debugf("buildGatewayListeners: servers for %d: \n%s", port, string(s4t))
 			}
 
 			switch transport {
@@ -180,7 +163,8 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 					port := &networking.Port{Number: port.Number, Protocol: port.Protocol}
 					opts.filterChainOpts = []*filterChainOpts{
 						configgen.createGatewayHTTPFilterChainOpts(builder.node, port, nil, serversForPort.RouteName,
-							proxyConfig, istionetworking.ListenerProtocolTCP)}
+							proxyConfig, istionetworking.ListenerProtocolTCP),
+					}
 					newFilterChains = append(newFilterChains, istionetworking.FilterChain{
 						ListenerProtocol: istionetworking.ListenerProtocolHTTP,
 					})
@@ -217,9 +201,6 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 					opts.filterChainOpts = tcpFilterChainOpts
 				}
 			case istionetworking.TransportProtocolQUIC:
-				if !features.EnableQUICListeners {
-					continue
-				}
 				// Currently, we just assume that QUIC is HTTP/3 although that does not
 				// have to be the case (it is just the most common case now, in the future
 				// we will support more cases)
@@ -612,6 +593,7 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 	// Build a filter chain for the HTTPS server
 	// We know that this is a HTTPS server because this function is called only for ports of type HTTP/HTTPS
 	// where HTTPS server's TLS mode is not passthrough and not nil
+	http3Enabled := transportProtocol == istionetworking.TransportProtocolQUIC
 	return &filterChainOpts{
 		// This works because we validate that only HTTPS servers can have same port but still different port names
 		// and that no two non-HTTPS servers can be on same port or share port names.
@@ -619,15 +601,12 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 		sniHosts:   node.MergedGateway.TLSServerInfo[server].SNIHosts,
 		tlsContext: buildGatewayListenerTLSContext(server, node, transportProtocol),
 		httpOpts: &httpListenerOpts{
-			rds:              routeName,
-			useRemoteAddress: true,
-			connectionManager: buildGatewayConnectionManager(proxyConfig, node,
-				features.EnableQUICListeners && transportProtocol == istionetworking.TransportProtocolQUIC),
-			addGRPCWebFilter: serverProto == protocol.GRPCWeb,
-			statPrefix:       server.Name,
-			// In future, maybe we need to check that the listener protocol is HTTP as well?
-			// But now we assume that only HTTP/3 goes over QUIC.
-			supportHTTP3: transportProtocol == istionetworking.TransportProtocolQUIC,
+			rds:               routeName,
+			useRemoteAddress:  true,
+			connectionManager: buildGatewayConnectionManager(proxyConfig, node, http3Enabled),
+			addGRPCWebFilter:  serverProto == protocol.GRPCWeb,
+			statPrefix:        server.Name,
+			supportHTTP3:      http3Enabled,
 		},
 	}
 }
@@ -667,7 +646,7 @@ func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *mo
 		StripPortMode:       stripPortMode,
 		DelayedCloseTimeout: features.DelayedCloseTimeout,
 	}
-	if http3SupportEnabled && features.EnableQUICListeners {
+	if http3SupportEnabled {
 		httpConnManager.Http3ProtocolOptions = &core.Http3ProtocolOptions{}
 		httpConnManager.CodecType = hcm.HttpConnectionManager_HTTP3
 	}
@@ -695,7 +674,7 @@ func buildGatewayListenerTLSContext(
 	}
 
 	alpnByTransport := util.ALPNHttp
-	if features.EnableQUICListeners && transportProtocol == istionetworking.TransportProtocolQUIC {
+	if transportProtocol == istionetworking.TransportProtocolQUIC {
 		alpnByTransport = util.ALPNHttp3OverQUIC
 	}
 	ctx := &tls.DownstreamTlsContext{
