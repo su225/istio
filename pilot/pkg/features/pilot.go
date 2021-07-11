@@ -502,7 +502,7 @@ var (
 		"If true, routes will use the target port of the gateway service in the route name, not the service port.").Get()
 
 	EnableQUICListeners = env.RegisterBoolVar("PILOT_ENABLE_QUIC_LISTENERS", false,
-		"If true, QUIC listeners will be generated wherever there are listeners terminating TLS").Get()
+		"If true, QUIC listeners will be generated wherever there are listeners terminating TLS on gateways").Get()
 )
 
 // UnsafeFeaturesEnabled returns true if any unsafe features are enabled.

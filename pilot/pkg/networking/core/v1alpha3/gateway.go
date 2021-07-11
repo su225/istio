@@ -209,6 +209,9 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 					log.Debugf("buildGatewayListeners: creating QUIC filter chain for port %d(%s:%s)",
 						server.GetPort().GetNumber(), server.GetPort().GetName(), server.GetPort().GetProtocol())
 					routeName := mergedGateway.TLSServerInfo[server].RouteName
+					if mergedGateway.TLSToQUICServerRouteMap[routeName] != "" {
+						routeName = mergedGateway.TLSToQUICServerRouteMap[routeName]
+					}
 					quicFilterChainOpts = append(quicFilterChainOpts, configgen.createGatewayHTTPFilterChainOpts(builder.node, server.Port, server,
 						routeName, proxyConfig, istionetworking.TransportProtocolQUIC))
 					newFilterChains = append(newFilterChains, istionetworking.FilterChain{
@@ -362,6 +365,11 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 
 	servers := merged.ServersByRouteName[routeName]
 
+	// When this is true, we add alt-svc header to the response to tell the client
+	// that HTTP/3 over QUIC is available on the same port for this host. This is
+	// very important for discovering HTTP/3 services
+	_, isH3DiscoveryNeeded := merged.TLSToQUICServerRouteMap[routeName]
+
 	gatewayRoutes := make(map[string]map[string][]*route.Route)
 	gatewayVirtualServices := make(map[string][]config.Config)
 	vHostDedupMap := make(map[host.Name]*route.VirtualHost)
@@ -425,7 +433,8 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 			vskey := virtualService.Name + "/" + virtualService.Namespace
 
 			if routes, exists = gatewayRoutes[gatewayName][vskey]; !exists {
-				routes, err = istio_route.BuildHTTPRoutesForVirtualService(node, push, virtualService, nameToServiceMap, port, map[string]bool{gatewayName: true})
+				routes, err = istio_route.BuildHTTPRoutesForVirtualService(node, push, virtualService, nameToServiceMap,
+					port, map[string]bool{gatewayName: true}, isH3DiscoveryNeeded)
 				if err != nil {
 					log.Debugf("%s omitting routes for virtual service %v/%v due to error: %v", node.ID, virtualService.Namespace, virtualService.Name, err)
 					continue

@@ -65,6 +65,11 @@ type MergedGateway struct {
 	// is limited to HTTP3 only
 	MergedQUICServers map[ServerPort]*MergedServers
 
+	// TLSToQUICServerRouteMap represents the map of route name from HTTPS
+	// to QUIC server routes. This mapping is used to generate alt-svc header
+	// that is needed for HTTP/3 server discovery.
+	TLSToQUICServerRouteMap map[string]string
+
 	// GatewayNameForServer maps from server to the owning gateway name.
 	// Used for select the set of virtual services that apply to a port.
 	GatewayNameForServer map[*networking.Server]string
@@ -127,6 +132,7 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 	serversByRouteName := make(map[string][]*networking.Server)
 	tlsServerInfo := make(map[*networking.Server]*TLSServerInfo)
 	gatewayNameForServer := make(map[*networking.Server]string)
+	tlsToQuicServerRouteMap := make(map[string]string)
 	tlsHostsByPort := map[uint32]sets.Set{} // port -> host set
 	autoPassthrough := false
 
@@ -256,11 +262,17 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 						if features.EnableQUICListeners && gateway.IsEligibleForHTTP3Upgrade(s) &&
 							udpSupportedPort(s.GetPort().GetNumber(), gwAndInstance.instances) {
 							log.Debugf("Server at port %d eligible for HTTP3 upgrade. Add QUIC listener", serverPort.Number)
+							h3MirrorRouteName := "h3-mirror." + routeName
 							if mergedQUICServers[serverPort] == nil {
-								mergedQUICServers[serverPort] = &MergedServers{Servers: []*networking.Server{s}}
+								mergedQUICServers[serverPort] = &MergedServers{
+									Servers:   []*networking.Server{s},
+									RouteName: h3MirrorRouteName,
+								}
 							} else {
 								mergedQUICServers[serverPort].Servers = append(mergedQUICServers[serverPort].Servers, s)
 							}
+							serversByRouteName[h3MirrorRouteName] = []*networking.Server{s}
+							tlsToQuicServerRouteMap[routeName] = h3MirrorRouteName
 						}
 					}
 				} else {
@@ -271,13 +283,20 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 					}
 					if gateway.IsHTTPServer(s) {
 						serversByRouteName[routeName] = []*networking.Server{s}
+
 						if features.EnableQUICListeners && gateway.IsEligibleForHTTP3Upgrade(s) &&
 							udpSupportedPort(s.GetPort().GetNumber(), gwAndInstance.instances) {
 							log.Debugf("Server at port %d eligible for HTTP3 upgrade. So QUIC listener will be added", serverPort.Number)
+
+							h3MirrorRouteName := "h3-mirror." + routeName
+							serversByRouteName[h3MirrorRouteName] = []*networking.Server{s}
+							tlsToQuicServerRouteMap[routeName] = h3MirrorRouteName
+
 							if mergedQUICServers[serverPort] == nil {
-								mergedQUICServers[serverPort] = &MergedServers{Servers: []*networking.Server{s}}
-							} else {
-								mergedQUICServers[serverPort].Servers = append(mergedQUICServers[serverPort].Servers, s)
+								mergedQUICServers[serverPort] = &MergedServers{
+									Servers:   []*networking.Server{s},
+									RouteName: h3MirrorRouteName,
+								}
 							}
 						}
 					}
@@ -296,6 +315,7 @@ func MergeGateways(gateways []gatewayWithInstances) *MergedGateway {
 		GatewayNameForServer:            gatewayNameForServer,
 		TLSServerInfo:                   tlsServerInfo,
 		ServersByRouteName:              serversByRouteName,
+		TLSToQUICServerRouteMap:         tlsToQuicServerRouteMap,
 		ContainsAutoPassthroughGateways: autoPassthrough,
 		PortMap:                         getTargetPortMap(serversByRouteName),
 	}
