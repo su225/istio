@@ -24,6 +24,8 @@ import (
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	rawbufferv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/raw_buffer/v3"
+	starttlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/starttls/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -36,6 +38,7 @@ import (
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
 	authn_model "istio.io/istio/pilot/pkg/security/model"
@@ -775,11 +778,25 @@ func (cb *ClusterBuilder) applyUpstreamTLSSettings(opts *buildClusterOpts, tls *
 		log.Errorf("failed to build Upstream TLSContext: %s", err.Error())
 		return
 	}
-
 	if tlsContext != nil {
-		c.cluster.TransportSocket = &core.TransportSocket{
-			Name:       util.EnvoyTLSSocketName,
-			ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(tlsContext)},
+		// If the upstream protocol is Start TLS (that is - it can switch to
+		// TLS midway as part of protocol negotiation, then upstream context
+		// settings would be different)
+		if features.PilotSupportStartTLSForUpstream && opts.port.Protocol.IsStartTLS() {
+			c.cluster.TransportSocket = &core.TransportSocket{
+				Name: util.EnvoyStartTLSSocketName,
+				ConfigType: &core.TransportSocket_TypedConfig{
+					TypedConfig: util.MessageToAny(&starttlsv3.UpstreamStartTlsConfig{
+						CleartextSocketConfig: &rawbufferv3.RawBuffer{},
+						TlsSocketConfig:       tlsContext,
+					}),
+				},
+			}
+		} else {
+			c.cluster.TransportSocket = &core.TransportSocket{
+				Name:       util.EnvoyTLSSocketName,
+				ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(tlsContext)},
+			}
 		}
 	}
 

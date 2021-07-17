@@ -43,6 +43,9 @@ const (
 	// TLS declares that the port carries TLS traffic.
 	// TLS traffic is assumed to contain SNI as part of the handshake.
 	TLS Instance = "TLS"
+	// START_TLS declares that the port can start with plaintext and
+	// then negotiate switching to TLS programmatically on the fly
+	START_TLS Instance = "STARTTLS"
 	// UDP declares that the port uses UDP.
 	// Note that UDP protocol is not currently supported by the proxy.
 	UDP Instance = "UDP"
@@ -79,6 +82,8 @@ func Parse(s string) Instance {
 		return Thrift
 	case "tls":
 		return TLS
+	case "starttls":
+		return START_TLS
 	case "mongo":
 		return Mongo
 	case "redis":
@@ -138,6 +143,10 @@ func (i Instance) IsTLS() bool {
 	default:
 		return false
 	}
+}
+
+func (i Instance) IsStartTLS() bool {
+	return i == START_TLS
 }
 
 // IsGRPC is true for GRPC protocols.

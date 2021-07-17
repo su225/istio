@@ -88,6 +88,10 @@ const (
 	// level tls transport socket configuration
 	EnvoyTLSSocketName = wellknown.TransportSocketTls
 
+	// EnvoyStartTLSSocketName matches with Start TLS
+	// TODO(su225): Remove this once go-control-plane adds this constant
+	EnvoyStartTLSSocketName = "envoy.transport_sockets.starttls"
+
 	// StatName patterns
 	serviceStatPattern         = "%SERVICE%"
 	serviceFQDNStatPattern     = "%SERVICE_FQDN%"
